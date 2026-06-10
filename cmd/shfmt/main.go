@@ -482,6 +482,57 @@ func editorConfigLangs(l syntax.LangVariant) []string {
 	return nil
 }
 
+// dialectParseHint returns a clearer error message when src fails to parse as
+// fileLang but does parse as zsh. The most common cause is a brace block closed
+// by a '}' without a preceding separator, as in `f() { echo foo }`: zsh accepts
+// it, but bash and POSIX treat the '}' as an ordinary word and report the much
+// less obvious "reached EOF without matching `{` with `}`". When that happens we
+// point at the offending source instead. An empty string means no hint applies,
+// e.g. a genuine syntax error that zsh rejects too.
+func dialectParseHint(src []byte, path string, fileLang syntax.LangVariant, parseErr error) string {
+	perr, ok := parseErr.(syntax.ParseError)
+	if !ok || fileLang == syntax.LangZsh {
+		return ""
+	}
+	// Limit this to an unclosed brace block, the construct this targets, so we
+	// do not reinterpret unrelated parse errors that happen to parse in zsh.
+	if !strings.Contains(perr.Text, "matching `{` with `}`") {
+		return ""
+	}
+	// Confirm the input is actually valid in zsh, so a genuinely truncated block
+	// such as `{ foo;` keeps its normal error instead of blaming the dialect.
+	zshParser := syntax.NewParser(syntax.Variant(syntax.LangZsh))
+	if _, err := zshParser.Parse(bytes.NewReader(src), path); err != nil {
+		return ""
+	}
+	loc := perr.Pos.String()
+	if path != "" {
+		loc = path + ":" + loc
+	}
+	return fmt.Sprintf("%s: expression not valid in dialect %s: %s",
+		loc, fileLang, sourceSnippet(src, perr.Pos))
+}
+
+// sourceSnippet returns a trimmed, length-limited excerpt of the source line at
+// pos, for use in error messages.
+func sourceSnippet(src []byte, pos syntax.Pos) string {
+	off := int(pos.Offset())
+	if off > len(src) {
+		off = len(src)
+	}
+	start := bytes.LastIndexByte(src[:off], '\n') + 1 // 0 when there is no earlier newline
+	end := len(src)
+	if rel := bytes.IndexByte(src[off:], '\n'); rel >= 0 {
+		end = off + rel
+	}
+	snippet := strings.TrimSpace(string(src[start:end]))
+	const maxLen = 60
+	if r := []rune(snippet); len(r) > maxLen {
+		snippet = strings.TrimRight(string(r[:maxLen-1]), " ") + "…"
+	}
+	return snippet
+}
+
 func formatBytes(src []byte, path string, fileLang syntax.LangVariant) error {
 	fileLangFromEditorConfig := false
 	if useEditorConfig {
@@ -503,6 +554,9 @@ func formatBytes(src []byte, path string, fileLang syntax.LangVariant) error {
 	} else {
 		node, err = parser.Parse(bytes.NewReader(src), path)
 		if err != nil {
+			if hint := dialectParseHint(src, path, fileLang, err); hint != "" {
+				return errors.New(hint)
+			}
 			if s, ok := err.(syntax.LangError); ok && lang.val == syntax.LangAuto {
 				if fileLangFromEditorConfig {
 					return fmt.Errorf("%w (parsed as %s via EditorConfig)", s, fileLang)

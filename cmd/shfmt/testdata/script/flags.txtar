@@ -109,6 +109,23 @@ stdin input-bash-extglobs
 ! exec shfmt -filename=input.sh
 stderr 'parsed as posix via -ln=auto'
 
+# A zsh-only construct, a brace block closed by '}' without a separator, reports
+# a clear dialect error pointing at the source rather than the generic
+# "reached EOF without matching `{`".
+stdin input-zsh-brace
+! exec shfmt -ln=bash
+stderr 'expression not valid in dialect bash: f\(\) \{ echo foo \}'
+! stderr 'reached EOF'
+
+stdin input-zsh-brace
+! exec shfmt -ln=posix
+stderr 'expression not valid in dialect posix: f\(\) \{ echo foo \}'
+
+# The same input is valid in zsh, which inserts the missing separator.
+stdin input-zsh-brace
+exec shfmt -ln=zsh
+stdout 'f\(\) \{ echo foo; \}'
+
 stdin flags-input
 exec shfmt -i 2
 cmp stdout flags-output.indent-golden
@@ -176,6 +193,8 @@ echo !(a)
 -- input-bash-arrays --
 #!/bin/sh
 foo=(bar)
+-- input-zsh-brace --
+f() { echo foo }
 
 -- flags-input --
 foo() {
